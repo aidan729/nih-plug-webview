@@ -3,6 +3,7 @@ use nih_plug::prelude::{Editor, GuiContext, ParamSetter};
 use serde_json::Value;
 use std::{
     borrow::Cow,
+    cell::RefCell,
     sync::{
         atomic::{AtomicU32, Ordering},
         Arc,
@@ -115,6 +116,8 @@ pub struct WindowHandler {
     events_receiver: Receiver<Value>,
     pub width: Arc<AtomicU32>,
     pub height: Arc<AtomicU32>,
+    // GUI-thread only resize queue - uses RefCell instead of Mutex since it never crosses threads
+    pending_resizes: RefCell<Vec<(u32, u32)>>,
 }
 
 impl WindowHandler {
@@ -132,6 +135,28 @@ impl WindowHandler {
             width: width as f64,
             height: height as f64,
         });
+    }
+
+    /// Queue a resize request to be processed later
+    /// This allows deferring resize operations to avoid borrow checker conflicts
+    pub fn queue_resize(&self, width: u32, height: u32) {
+        self.pending_resizes.borrow_mut().push((width, height));
+    }
+
+    /// Process any pending resize requests
+    /// Returns the size that was applied, if any
+    pub fn process_pending_resizes(&self, window: &mut baseview::Window) -> Option<(u32, u32)> {
+        let mut queue = self.pending_resizes.borrow_mut();
+        if let Some((width, height)) = queue.pop() {
+            // Only process the most recent resize request to avoid lag
+            queue.clear();
+            drop(queue); // Release the borrow before calling resize
+
+            self.resize(window, width, height);
+            Some((width, height))
+        } else {
+            None
+        }
     }
 
     pub fn send_json(&self, json: Value) {
@@ -255,6 +280,7 @@ impl Editor for WebViewEditor {
                 mouse_handler,
                 width,
                 height,
+                pending_resizes: RefCell::new(Vec::new()),
             }
         });
         return Box::new(Instance { window_handle });
